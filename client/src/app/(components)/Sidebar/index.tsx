@@ -82,7 +82,7 @@ const Sidebar = () => {
         }`}
       >
         <Image
-          src="https://nextjs-app-0028.s3.ap-south-1.amazonaws.com/logo.png"
+          src="https://inventorymanagement0028.s3.ap-east-1.amazonaws.com/logo.png"
           alt="edstock-logo"
           width={27}
           height={27}
