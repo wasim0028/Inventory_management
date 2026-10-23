@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Inventory Management v2 - API Gateway (HTTP API) + Cognito + Lambda,
+  backed by an existing PostgreSQL database (RDS) whose credentials live in Secrets Manager.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+    Description: Name used in resource names (inventory-prod-api, ...)
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: "http://localhost:3000"
+    Description: Front-end URLs allowed to call the API (add your Amplify URL after the first deploy)
+  DbSecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret with the database username and password
+  DbHost:
+    Type: String
+    Description: RDS endpoint, e.g. mydb.abc123.ap-south-1.rds.amazonaws.com
+  DbName:
+    Type: String
+    Default: postgres
+  DbPort:
+    Type: Number
+    Default: 5432
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >
+      Optional. Private subnets for the Lambda when RDS is not publicly accessible.
+      Leave empty to run the Lambda outside a VPC.
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Optional. Security groups for the Lambda (must be allowed into the RDS security group on 5432)
+  AllowSelfSignUp:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: When false, only an admin can create users (in the Cognito console)
+
+Conditions:
+  UseVpc: !Not [!Equals [!Join ["", !Ref SubnetIds], ""]]
+  SelfSignUp: !Equals [!Ref AllowSelfSignUp, "true"]
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    MemorySize: 512
+    Timeout: 15
+    Tracing: Active
+
+Resources:
+  # ---------------------------------------------------------------- Cognito
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub inventory-${Stage}-users
+      # Lite covers email/password sign-in and is the cheapest tier past the free 10,000 MAU.
+      UserPoolTier: LITE
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: !If [SelfSignUp, false, true]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 10
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+        - Name: name
+          Required: false
+          Mutable: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub inventory-${Stage}-web
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admin
+      Description: Can archive products, delete expenses and manage the team list
+      UserPoolId: !Ref UserPool
+
+  # ------------------------------------------------------------ API Gateway
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      # $default stage: no stage prefix in the URL or in the paths Express sees.
+      StageName: $default
+      CorsConfiguration:
+        AllowOrigins: !Ref AllowedOrigins
+        AllowHeaders: [authorization, content-type]
+        AllowMethods: [GET, POST, PATCH, DELETE, OPTIONS]
+        MaxAge: 600
+      Auth:
+        DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+              audience:
+                - !Ref UserPoolClient
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 25
+
+  # ----------------------------------------------------------------- Lambda
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub inventory-${Stage}-api
+      CodeUri: server/dist
+      Handler: index.handler
+      Environment:
+        Variables:
+          NODE_OPTIONS: --enable-source-maps
+          # Trust the RDS certificate authority that ships with the Lambda runtime.
+          NODE_EXTRA_CA_CERTS: /var/runtime/ca-cert.pem
+          DB_SECRET_ARN: !Ref DbSecretArn
+          DB_HOST: !Ref DbHost
+          DB_NAME: !Ref DbName
+          DB_PORT: !Ref DbPort
+          DB_SSL: "true"
+      VpcConfig: !If
+        - UseVpc
+        - SubnetIds: !Ref SubnetIds
+          SecurityGroupIds: !Ref SecurityGroupIds
+        - !Ref AWS::NoValue
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref DbSecretArn
+        - !If
+          - UseVpc
+          - AWSLambdaVPCAccessExecutionRole
+          - !Ref AWS::NoValue
+      Events:
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /health
+            Method: GET
+            Auth:
+              Authorizer: NONE
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/inventory-${Stage}-api
+      RetentionInDays: 14
+
+Outputs:
+  ApiUrl:
+    Description: Set as NEXT_PUBLIC_API_BASE_URL in the client
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+  UserPoolId:
+    Description: Set as NEXT_PUBLIC_COGNITO_USER_POOL_ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Set as NEXT_PUBLIC_COGNITO_CLIENT_ID
+    Value: !Ref UserPoolClient
+  Region:
+    Value: !Ref AWS::Region

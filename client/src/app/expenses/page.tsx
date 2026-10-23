@@ -1,189 +1,175 @@
 "use client";
 
+import { Suspense } from "react";
+import { Plus, Search, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { useDeleteExpenseMutation, useGetExpensesByCategoryQuery, useGetExpensesQuery } from "@/state/api";
+import { openDialog, useAppDispatch } from "@/state/store";
+import { useIsAdmin } from "@/lib/hooks";
+import { useSearchBox, useUrlState } from "@/lib/useUrlState";
+import { date, errorMessage, money, moneyExact } from "@/lib/format";
+import { RankedBars } from "@/components/charts";
 import {
-  ExpenseByCategorySummary,
-  useGetExpensesByCategoryQuery,
-} from "@/state/api";
-import { useMemo, useState } from "react";
-import Header from "@/app/(components)/Header";
-import {
-  Cell,
-  Legend,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-} from "recharts";
+  Button,
+  cx,
+  EmptyState,
+  ErrorState,
+  IconButton,
+  Input,
+  PageHeader,
+  Pagination,
+  Panel,
+  Skeleton,
+  SkeletonRows,
+  TableShell,
+  Td,
+  Th,
+} from "@/components/ui";
 
-type AggregatedDataItem = {
-  name: string;
-  color?: string;
-  amount: number;
-};
-
-type AggregatedData = {
-  [category: string]: AggregatedDataItem;
-};
-
-const Expenses = () => {
-  const [activeIndex, setActiveIndex] = useState(0);
-  const [selectedCategory, setSelectedCategory] = useState("All");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-
-  const {
-    data: expensesData,
-    isLoading,
-    isError,
-  } = useGetExpensesByCategoryQuery();
-  const expenses = useMemo(() => expensesData ?? [], [expensesData]);
-
-  const parseDate = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toISOString().split("T")[0];
-  };
-
-  const aggregatedData: AggregatedDataItem[] = useMemo(() => {
-    const filtered: AggregatedData = expenses
-      .filter((data: ExpenseByCategorySummary) => {
-        const matchesCategory =
-          selectedCategory === "All" || data.category === selectedCategory;
-        const dataDate = parseDate(data.date);
-        const matchesDate =
-          !startDate ||
-          !endDate ||
-          (dataDate >= startDate && dataDate <= endDate);
-        return matchesCategory && matchesDate;
-      })
-      .reduce((acc: AggregatedData, data: ExpenseByCategorySummary) => {
-        const amount = parseInt(data.amount);
-        if (!acc[data.category]) {
-          acc[data.category] = { name: data.category, amount: 0 };
-          acc[data.category].color = `#${Math.floor(
-            Math.random() * 16777215
-          ).toString(16)}`;
-          acc[data.category].amount += amount;
-        }
-        return acc;
-      }, {});
-
-    return Object.values(filtered);
-  }, [expenses, selectedCategory, startDate, endDate]);
-
-  const classNames = {
-    label: "block text-sm font-medium text-gray-700",
-    selectInput:
-      "mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md",
-  };
-
-  if (isLoading) {
-    return <div className="py-4">Loading...</div>;
-  }
-
-  if (isError || !expensesData) {
-    return (
-      <div className="text-center text-red-500 py-4">
-        Failed to fetch expenses
-      </div>
-    );
-  }
+function ExpensesView() {
+  const dispatch = useAppDispatch();
+  const isAdmin = useIsAdmin();
+  const [s, set] = useUrlState({ q: "", category: "", page: "1" });
+  const [search, setSearch] = useSearchBox(s.q, set);
+  const { data, isLoading, isFetching, error, refetch } = useGetExpensesQuery({
+    q: s.q,
+    category: s.category,
+    page: Number(s.page) || 1,
+    pageSize: 20,
+  });
+  const { data: byCategory, isLoading: catLoading } = useGetExpensesByCategoryQuery();
+  const [remove] = useDeleteExpenseMutation();
+  const grand = byCategory?.reduce((sum, c) => sum + c.amount, 0) ?? 0;
 
   return (
-    <div>
-      {/* HEADER */}
-      <div className="mb-5">
-        <Header name="Expenses" />
-        <p className="text-sm text-gray-500">
-          A visual representation of expenses over time.
-        </p>
-      </div>
+    <>
+      <PageHeader
+        title="Expenses"
+        description="Running costs outside of stock purchases."
+        actions={
+          <Button variant="primary" onClick={() => dispatch(openDialog({ kind: "expense" }))}>
+            <Plus className="size-4" aria-hidden /> Add expense
+          </Button>
+        }
+      />
 
-      {/* FILTERS */}
-      <div className="flex flex-col md:flex-row justify-between gap-4">
-        <div className="w-full md:w-1/3 bg-white shadow rounded-lg p-6">
-          <h3 className="text-lg font-semibold mb-4">
-            Filter by Category and Date
-          </h3>
-          <div className="space-y-4">
-            {/* CATEGORY */}
-            <div>
-              <label htmlFor="category" className={classNames.label}>
-                Category
-              </label>
-              <select
-                id="category"
-                name="category"
-                className={classNames.selectInput}
-                defaultValue="All"
-                onChange={(e) => setSelectedCategory(e.target.value)}
-              >
-                <option>All</option>
-                <option>Office</option>
-                <option>Professional</option>
-                <option>Salaries</option>
-              </select>
-            </div>
-            {/* START DATE */}
-            <div>
-              <label htmlFor="start-date" className={classNames.label}>
-                Start Date
-              </label>
-              <input
-                type="date"
-                id="start-date"
-                name="start-date"
-                className={classNames.selectInput}
-                onChange={(e) => setStartDate(e.target.value)}
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <div>
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <div className="relative w-full sm:w-72">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-ink-3" aria-hidden />
+              <Input
+                type="search"
+                aria-label="Search expenses"
+                placeholder="Category or description"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-9"
               />
             </div>
-            {/* END DATE */}
-            <div>
-              <label htmlFor="end-date" className={classNames.label}>
-                End Date
-              </label>
-              <input
-                type="date"
-                id="end-date"
-                name="end-date"
-                className={classNames.selectInput}
-                onChange={(e) => setEndDate(e.target.value)}
-              />
-            </div>
+            {s.category && (
+              <Button size="sm" variant="ghost" onClick={() => set({ category: "" })}>
+                Showing {s.category} only. Show all
+              </Button>
+            )}
+          </div>
+
+          <div className={cx("overflow-hidden rounded-xl border border-line bg-panel", isFetching && !isLoading && "opacity-70")}>
+            {error ? (
+              <ErrorState message={errorMessage(error)} onRetry={refetch} />
+            ) : (
+              <>
+                <TableShell>
+                  <thead>
+                    <tr>
+                      <Th>Date</Th>
+                      <Th>Category</Th>
+                      <Th>Description</Th>
+                      <Th className="text-right">Amount</Th>
+                      {isAdmin && (
+                        <Th className="w-0">
+                          <span className="sr-only">Actions</span>
+                        </Th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {isLoading && <SkeletonRows cols={isAdmin ? 5 : 4} />}
+                    {data?.items.map((e) => (
+                      <tr key={e.expenseId}>
+                        <Td className="whitespace-nowrap text-ink-2">{date(e.timestamp)}</Td>
+                        <Td className="font-medium">{e.category}</Td>
+                        <Td className="max-w-64 truncate text-ink-2">{e.description ?? ""}</Td>
+                        <Td className="num text-right font-medium">{moneyExact(e.amount)}</Td>
+                        {isAdmin && (
+                          <Td>
+                            <IconButton
+                              label={`Delete ${e.category} expense`}
+                              onClick={async () => {
+                                if (!confirm(`Delete this ${e.category} expense of ${moneyExact(e.amount)}?`)) return;
+                                try {
+                                  await remove(e.expenseId).unwrap();
+                                  toast.success("Expense deleted");
+                                } catch (err) {
+                                  toast.error(errorMessage(err));
+                                }
+                              }}
+                            >
+                              <Trash2 className="size-4" />
+                            </IconButton>
+                          </Td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </TableShell>
+                {data && data.total === 0 && (
+                  <EmptyState
+                    title={s.q || s.category ? "No expenses match" : "No expenses yet"}
+                    action={
+                      <Button variant="primary" onClick={() => dispatch(openDialog({ kind: "expense" }))}>
+                        Add expense
+                      </Button>
+                    }
+                  />
+                )}
+                {data && (
+                  <Pagination
+                    page={data.page}
+                    pageCount={data.pageCount}
+                    total={data.total}
+                    pageSize={data.pageSize}
+                    onPage={(p) => set({ page: String(p) })}
+                  />
+                )}
+              </>
+            )}
           </div>
         </div>
-        {/* PIE CHART */}
-        <div className="flex-grow bg-white shadow rounded-lg p-4 md:p-6">
-          <ResponsiveContainer width="100%" height={400}>
-            <PieChart>
-              <Pie
-                data={aggregatedData}
-                cx="50%"
-                cy="50%"
-                label
-                outerRadius={150}
-                fill="#8884d8"
-                dataKey="amount"
-                onMouseEnter={(_, index) => setActiveIndex(index)}
-              >
-                {aggregatedData.map(
-                  (entry: AggregatedDataItem, index: number) => (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={
-                        index === activeIndex ? "rgb(29, 78, 216)" : entry.color
-                      }
-                    />
-                  )
-                )}
-              </Pie>
-              <Tooltip />
-              <Legend />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-    </div>
-  );
-};
 
-export default Expenses;
+        <Panel title="By category, all time">
+          {catLoading ? (
+            <Skeleton className="h-48" />
+          ) : (
+            <>
+              <p className="num mb-4 font-display text-3xl font-semibold">{money(grand)}</p>
+              <RankedBars
+                rows={(byCategory ?? []).map((c) => ({ key: c.category, label: c.category, value: c.amount }))}
+                onSelect={(category) => set({ category })}
+              />
+              <p className="mt-4 text-xs text-ink-3">Select a category to filter the list.</p>
+            </>
+          )}
+        </Panel>
+      </div>
+    </>
+  );
+}
+
+export default function ExpensesPage() {
+  return (
+    <Suspense>
+      <ExpensesView />
+    </Suspense>
+  );
+}
