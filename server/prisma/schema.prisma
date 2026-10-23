@@ -1,0 +1,81 @@
+// Prisma 7 schema. The connection string lives in prisma.config.ts (CLI) and
+// is passed to the client at runtime through the pg driver adapter (src/lib/db.ts).
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Users {
+  userId    String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  role      String   @default("staff")
+  createdAt DateTime @default(now())
+
+  @@index([name])
+}
+
+model Products {
+  productId     String      @id @default(uuid())
+  sku           String?     @unique
+  name          String
+  category      String      @default("General")
+  price         Float
+  rating        Float?
+  stockQuantity Int         @default(0)
+  reorderLevel  Int         @default(10)
+  imageUrl      String?
+  archivedAt    DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  Sales         Sales[]
+  Purchases     Purchases[]
+
+  @@index([name])
+  @@index([archivedAt])
+}
+
+model Sales {
+  saleId      String   @id @default(uuid())
+  productId   String
+  timestamp   DateTime @default(now())
+  quantity    Int
+  unitPrice   Float
+  totalAmount Float
+  note        String?
+  product     Products @relation(fields: [productId], references: [productId])
+
+  @@index([productId])
+  @@index([timestamp])
+}
+
+model Purchases {
+  purchaseId String   @id @default(uuid())
+  productId  String
+  timestamp  DateTime @default(now())
+  quantity   Int
+  unitCost   Float
+  totalCost  Float
+  supplier   String?
+  product    Products @relation(fields: [productId], references: [productId])
+
+  @@index([productId])
+  @@index([timestamp])
+}
+
+model Expenses {
+  expenseId   String   @id @default(uuid())
+  category    String
+  amount      Float
+  description String?
+  timestamp   DateTime @default(now())
+
+  @@index([category])
+  @@index([timestamp])
+}
