@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars (git-ignored) for local runs. In GitHub Actions these
+# come from environment variables instead (TF_VAR_alert_email, etc.).
+#
+# Never put the GitHub token in this file. Export it instead:
+#   export TF_VAR_github_access_token=ghp_xxx
+
+alert_email = "you@example.com"
+
+# Everything below already has a prod default in variables.tf; uncomment to change.
+# monthly_budget_usd    = 60
+# amplify_branch        = "main"
+# extra_allowed_origins = []
+# allow_self_signup     = false
+# enable_flow_logs      = true

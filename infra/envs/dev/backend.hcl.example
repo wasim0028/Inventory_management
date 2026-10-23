@@ -1,0 +1,3 @@
+# Copy to backend.hcl (git-ignored) and run: terraform init -backend-config=backend.hcl
+# The bucket name is the `state_bucket` output of infra/bootstrap.
+bucket = "stockroom-tfstate-123456789012-ap-south-1"

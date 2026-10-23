@@ -1,6 +1,7 @@
 import type { ErrorRequestHandler, NextFunction, Request, Response } from "express";
 import { z, ZodError } from "zod";
 import { Prisma } from "../generated/prisma/client.js";
+import { resetDb } from "./db.js";
 
 export class HttpError extends Error {
   constructor(
@@ -46,6 +47,14 @@ export const errorHandler: ErrorRequestHandler = (
     return;
   }
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    if (err.code === "P1000") {
+      // Authentication failed: the password was probably rotated. Re-read the
+      // secret on the next request.
+      console.warn("Database authentication failed; reloading credentials");
+      resetDb();
+      res.status(503).json({ message: "The database connection was refreshed. Try again." });
+      return;
+    }
     if (err.code === "P2002") {
       res.status(409).json({ message: "A record with that value already exists" });
       return;

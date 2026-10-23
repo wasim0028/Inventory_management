@@ -73,4 +73,15 @@ export function getDb(): Promise<PrismaClient> {
   return clientPromise;
 }
 
+/**
+ * Drops the cached client so the next request reads the secret again.
+ * Called when the database rejects our password, which happens after RDS
+ * rotates the managed master password (every 7 days by default).
+ */
+export function resetDb(): void {
+  const old = clientPromise;
+  clientPromise = undefined;
+  old?.then((c) => c.$disconnect()).catch(() => {});
+}
+
 export type Db = PrismaClient;

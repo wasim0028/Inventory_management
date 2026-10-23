@@ -1,0 +1,28 @@
+version: 0.2
+
+env:
+  shell: bash
+  # CodeBuild reads these from Secrets Manager and masks them in the logs.
+  secrets-manager:
+    DB_USER: "${db_secret_arn}:username"
+    DB_PASS: "${db_secret_arn}:password"
+  variables:
+    DB_HOST: "${db_host}"
+    DB_PORT: "${db_port}"
+    DB_NAME: "${db_name}"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+  pre_build:
+    commands:
+      - echo "Installing server dependencies (includes the Prisma CLI)"
+      - npm ci --no-audit --no-fund
+  build:
+    commands:
+      - |
+        ENC_USER=$(node -e 'process.stdout.write(encodeURIComponent(process.env.DB_USER))')
+        ENC_PASS=$(node -e 'process.stdout.write(encodeURIComponent(process.env.DB_PASS))')
+        export DATABASE_URL="postgresql://$ENC_USER:$ENC_PASS@$DB_HOST:$DB_PORT/$DB_NAME?sslmode=require"
+        npx prisma migrate deploy

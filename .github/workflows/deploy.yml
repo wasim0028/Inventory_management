@@ -1,0 +1,162 @@
+# Deploys on push: develop -> dev, main -> prod. Can also be run by hand.
+#
+#   1. Build the Lambda bundle
+#   2. terraform apply with the temporary NAT Gateway switched ON
+#   3. Upload server/ to S3 and run the CodeBuild migration project
+#   4. terraform apply with the NAT Gateway switched OFF (always runs)
+#
+# Amplify builds the website itself on every push to the branch.
+name: Deploy
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - "infra/**"
+      - "server/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        type: choice
+        options: [dev, prod]
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # GitHub OIDC -> AWS
+
+env:
+  TF_VERSION: "1.16.6"
+  TF_IN_AUTOMATION: "true"
+  AWS_REGION: ap-south-1
+
+jobs:
+  deploy:
+    name: deploy (${{ inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # The GitHub environment name must match the deploy role's trust policy
+    # (repo:<owner>/<repo>:environment:<env>). Add required reviewers to "prod"
+    # in GitHub settings to get a manual approval step.
+    environment: ${{ inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }}
+    concurrency:
+      group: deploy-${{ inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }}
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT: ${{ inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }}
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_VAR_github_access_token: ${{ secrets.AMPLIFY_GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Build the Lambda bundle
+        working-directory: server
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        id: init
+        working-directory: infra/envs/${{ env.ENVIRONMENT }}
+        run: terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: terraform apply (NAT on for migrations)
+        working-directory: infra/envs/${{ env.ENVIRONMENT }}
+        run: terraform apply -input=false -auto-approve -lock-timeout=10m -var enable_migration_nat=true
+
+      - name: Read outputs
+        id: out
+        working-directory: infra/envs/${{ env.ENVIRONMENT }}
+        run: |
+          {
+            echo "project=$(terraform output -raw migration_project_name)"
+            echo "bucket=$(terraform output -raw migration_source_bucket)"
+            echo "key=$(terraform output -raw migration_source_key)"
+            echo "site=$(terraform output -raw site_url)"
+            echo "api=$(terraform output -raw api_url)"
+            echo "app_domain=$(terraform output -raw amplify_default_domain)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload migration source
+        id: upload
+        run: |
+          set -euo pipefail
+          (cd server && zip -qr ../server.zip . -x 'node_modules/*' 'dist/*' 'src/generated/*' '.env')
+          version=$(aws s3api put-object \
+            --bucket "${{ steps.out.outputs.bucket }}" \
+            --key "${{ steps.out.outputs.key }}" \
+            --body server.zip \
+            --query VersionId --output text)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run database migrations (CodeBuild)
+        run: |
+          set -euo pipefail
+          build_id=$(aws codebuild start-build \
+            --project-name "${{ steps.out.outputs.project }}" \
+            --source-version "${{ steps.upload.outputs.version }}" \
+            --query build.id --output text)
+          echo "Started $build_id"
+          while true; do
+            sleep 15
+            status=$(aws codebuild batch-get-builds --ids "$build_id" --query 'builds[0].buildStatus' --output text)
+            phase=$(aws codebuild batch-get-builds --ids "$build_id" --query 'builds[0].currentPhase' --output text)
+            echo "status=$status phase=$phase"
+            [ "$status" = "IN_PROGRESS" ] || break
+          done
+          logs=$(aws codebuild batch-get-builds --ids "$build_id" --query 'builds[0].logs.deepLink' --output text)
+          echo "Build logs: $logs"
+          if [ "$status" != "SUCCEEDED" ]; then
+            echo "::error::Migrations failed ($status). Logs: $logs"
+            exit 1
+          fi
+
+      - name: terraform apply (NAT off)
+        # Always remove the NAT Gateway, even if an earlier step failed.
+        if: always() && steps.init.outcome == 'success'
+        working-directory: infra/envs/${{ env.ENVIRONMENT }}
+        run: terraform apply -input=false -auto-approve -lock-timeout=10m -var enable_migration_nat=false
+
+      - name: Start the first website build
+        # Amplify builds on every push once connected; the very first build
+        # after the branch is created has to be started by hand.
+        if: success()
+        run: |
+          set -euo pipefail
+          app_id=$(aws amplify list-apps --query "apps[?defaultDomain=='${{ steps.out.outputs.app_domain }}'].appId | [0]" --output text)
+          branch=$([ "$ENVIRONMENT" = "prod" ] && echo main || echo develop)
+          jobs=$(aws amplify list-jobs --app-id "$app_id" --branch-name "$branch" --max-items 1 --query 'length(jobSummaries)' --output text)
+          if [ "$jobs" = "0" ]; then
+            aws amplify start-job --app-id "$app_id" --branch-name "$branch" --job-type RELEASE >/dev/null
+            echo "Started the first Amplify build for $branch"
+          fi
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo "### Deployed \`$ENVIRONMENT\`"
+            echo "- Website: ${{ steps.out.outputs.site }}"
+            echo "- API: ${{ steps.out.outputs.api }}"
+          } >> "$GITHUB_STEP_SUMMARY"

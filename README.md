@@ -38,7 +38,8 @@ RDS PostgreSQL
 ## Project layout
 
 ```
-template.yaml          AWS SAM: Cognito, API Gateway, Lambda
+infra/                 Terraform: network, RDS, Cognito, API Gateway + Lambda, Amplify, migrations, monitoring
+.github/workflows/     PR checks (fmt, validate, tests, tflint, checkov, plan) and deploys
 amplify.yml            Amplify Hosting build for the front end
 docker-compose.yml     Local PostgreSQL, API and website (server/Dockerfile, client/Dockerfile)
 server/
@@ -95,122 +96,11 @@ Run the API tests with `npm test` in `server/` (they use the database in `DATABA
 
 ## Deploy to AWS
 
-The steps use the Mumbai region (`ap-south-1`); change it if you use another region.
-
-### 1. Database credentials in Secrets Manager
-
-You can keep the RDS PostgreSQL database from v1. The upgrade migration keeps your
-existing products, sales, purchases, expenses and users.
-
-- If the RDS instance was created with **Manage master credentials in AWS Secrets
-  Manager**, use that secret's ARN.
-- Otherwise create a secret: Secrets Manager → **Store a new secret** →
-  **Credentials for Amazon RDS database** → enter the username and password → choose your
-  database → name it (for example `inventory/db`). Copy its ARN.
-
-### 2. Update the database schema
-
-Run this from a machine that can reach the database, such as your EC2 instance in the
-same VPC, or your computer if the database is publicly accessible:
-
-```bash
-cd server
-npm ci
-DATABASE_URL="postgresql://USER:PASSWORD@YOUR-RDS-ENDPOINT:5432/DBNAME?sslmode=require" \
-  npx prisma migrate deploy
-```
-
-> The migration removes the four v1 summary tables (`SalesSummary`, `PurchaseSummary`,
-> `ExpenseSummary`, `ExpenseByCategory`). The dashboard now calculates these numbers from
-> the real data. Per-category expense rows are copied into `Expenses` first.
-> Take an RDS snapshot before running it if you want a way back.
-
-To load the demo data instead, also run `npm run seed` with the same `DATABASE_URL`.
-**This deletes all existing data.**
-
-### 3. Deploy the API (Cognito, API Gateway, Lambda)
-
-Install the [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html), then:
-
-```bash
-cd server && npm ci && npm run build && cd ..
-sam deploy --guided --region ap-south-1
-```
-
-`--guided` asks for each parameter and saves your answers in `samconfig.toml`:
-
-| Parameter | Value |
-|---|---|
-| `DbSecretArn` | ARN from step 1 |
-| `DbHost` | RDS endpoint, e.g. `mydb.abc123.ap-south-1.rds.amazonaws.com` |
-| `DbName` | Database name (often `postgres`) |
-| `AllowedOrigins` | `http://localhost:3000` for now; add the Amplify URL later |
-| `SubnetIds`, `SecurityGroupIds` | See "Networking" below |
-| `AllowSelfSignUp` | `false` (only you create accounts) or `true` |
-
-When it finishes, note the outputs: `ApiUrl`, `UserPoolId`, `UserPoolClientId`.
-
-To deploy a later change: `cd server && npm run build && cd .. && sam deploy`.
-
-#### Networking: how the Lambda reaches RDS
-
-- **Private database (recommended):** put the Lambda in the database's VPC. Set
-  `SubnetIds` to two private subnets and `SecurityGroupIds` to a new security group. In
-  the RDS security group, allow inbound PostgreSQL (5432) from that group. A Lambda in a
-  VPC has no internet access, so also add a **VPC interface endpoint for Secrets Manager**
-  (VPC console → Endpoints → `com.amazonaws.ap-south-1.secretsmanager`, same subnets,
-  a security group that allows 443 from the Lambda's group, private DNS on). The endpoint
-  has an hourly charge per Availability Zone.
-- **Publicly accessible database (simplest, less secure):** leave `SubnetIds` and
-  `SecurityGroupIds` empty. Lambda has no fixed IP address, so the RDS security group
-  must allow 5432 from anywhere. Use a strong password. The connection is still encrypted
-  with TLS.
-
-### 4. Create your first user
-
-Cognito console → User pools → `inventory-prod-users`:
-
-1. **Users → Create user**: enter your email and a temporary password. You choose a new
-   password at first sign-in.
-2. **Groups → admin → Add user to group**: admins can archive products, delete expenses
-   and manage the team list. Everyone else can add and edit products, record sales,
-   receive stock and add expenses.
-
-### 5. Host the front end on Amplify
-
-1. Push this project to GitHub.
-2. Amplify console → **Create new app** → GitHub → pick the repo and branch. Tick
-   **My app is a monorepo** and enter `client`. Amplify picks up `amplify.yml`.
-3. Under **Environment variables** add:
-
-   | Variable | Value |
-   |---|---|
-   | `NEXT_PUBLIC_API_BASE_URL` | `ApiUrl` output |
-   | `NEXT_PUBLIC_AWS_REGION` | `ap-south-1` |
-   | `NEXT_PUBLIC_COGNITO_USER_POOL_ID` | `UserPoolId` output |
-   | `NEXT_PUBLIC_COGNITO_CLIENT_ID` | `UserPoolClientId` output |
-   | `NEXT_PUBLIC_CURRENCY` | `INR` (optional) |
-
-4. Deploy. Then allow the site to call the API by re-running
-   `sam deploy --parameter-overrides AllowedOrigins="https://main.xxxx.amplifyapp.com"`
-   (comma-separate several URLs).
-
-Once everything works you can stop or terminate the v1 EC2 instance, and the
-API Gateway you set up for v1, so they stop costing money.
-
-## Costs (small team)
-
-| Service | What you pay for |
-|---|---|
-| Lambda, API Gateway | Per request; normally within the free tier or a few rupees a month at this size |
-| Cognito | Lite tier: the first 10,000 monthly active users are free |
-| Secrets Manager | About $0.40 a month for the database secret |
-| RDS | The largest cost: instance hours and storage (same as v1) |
-| Amplify Hosting | Build minutes and data served; small for this app |
-| VPC endpoint | Only with the private-database setup: hourly per AZ |
-
-Check current prices on each service's pricing page. An AWS Budget alert (Billing →
-Budgets) is a good safety net.
+All AWS infrastructure is defined in Terraform in [`infra/`](infra/README.md), with two
+environments: **dev** (deployed from the `develop` branch) and **prod** (from `main`).
+GitHub Actions checks every pull request and deploys on push, including database
+migrations. Start with [infra/README.md](infra/README.md): it covers the one-time setup,
+the first deploy, creating your first user, costs and rollbacks.
 
 ## API
 
